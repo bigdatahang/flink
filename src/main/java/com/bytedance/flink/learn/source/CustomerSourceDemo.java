@@ -4,24 +4,50 @@ import com.alibaba.fastjson.JSON;
 import lombok.*;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.RandomUtils;
-import org.apache.flink.api.common.functions.RuntimeContext;
+import org.apache.flink.connector.jdbc.JdbcExecutionOptions;
+import org.apache.flink.connector.jdbc.JdbcSink;
+import org.apache.flink.connector.jdbc.JdbcStatementBuilder;
+import org.apache.flink.connector.jdbc.internal.options.JdbcConnectorOptions;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
-import org.apache.flink.streaming.api.functions.source.SourceFunction;
 
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
 
 public class CustomerSourceDemo {
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.setParallelism(1);
 
-        env.addSource(new MySourceFunction())
-                .setParallelism(2)
-                .map(JSON::toJSONString)
-                .print();
-
+        DataStreamSource<EventLog> stream = env.addSource(new MySourceFunction());
+        SinkFunction<EventLog> jdbcSink = JdbcSink.sink(
+                "insert into t_event values(?, ?, ?, ?, ?) on duplicate key update sessionId = ?, eventId = ?, ts = ?, eventInfo = ?",
+                new JdbcStatementBuilder<EventLog>() {
+                    @Override
+                    public void accept(PreparedStatement preparedStatement, EventLog eventLog) throws SQLException {
+                        preparedStatement.setLong(1, eventLog.getGuid());
+                        preparedStatement.setString(2, eventLog.getSessionId());
+                        preparedStatement.setString(3, eventLog.getEventId());
+                        preparedStatement.setLong(4, eventLog.getTimestamp());
+                        preparedStatement.setString(5, JSON.toJSONString(eventLog.getEventInfo()));
+                    }
+                }, JdbcExecutionOptions
+                        .builder()
+                        .withBatchSize(5)
+                        .withMaxRetries(2)
+                        .build(),
+                JdbcConnectorOptions
+                        .builder()
+                        .setDBUrl("jdbc:mysql://hadoop102:3306")
+                        .setDriverName("com.mysql.cj.Driver")
+                        .setUsername("root")
+                        .setPassword("000000")
+                        .build()
+        );
+        stream.addSink(jdbcSink);
         env.execute();
     }
 }
